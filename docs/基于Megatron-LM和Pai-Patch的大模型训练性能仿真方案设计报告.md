@@ -58,10 +58,14 @@
 
 ### 2.1 设计哲学
 
+> **环境前提：本项目的大模型训练与性能仿真完全基于 CPU 环境运行，与 CUDA、GPU 无关。**
+>
+> 所有训练流程、计算图捕获、性能仿真和 What-if 分析均在纯 CPU 环境下完成。项目中涉及的 GPU 硬件参数（如 A100/H100 算力、NVLink 带宽）仅作为仿真输入的理论值，不依赖真实 GPU 硬件。
+
 基于现有 Megatron-LM + Pai-Megatron-Patch 训练框架，我们提出 **静态分析为体，Trace校准为用，框架适配为桥** 的混合仿真路线：
 
-1. **以静态分析模型为体**：参考 SimuMax 的 Cost Model + Memory Model + Roofline Model，在 CPU 环境下即可快速评估各种并行策略的性能和显存占用，无需等待 GPU 资源
-2. **以 Trace 校准为用**：参考 Lumos 的 Trace-driven 思想，在真实 GPU 上通过 PyTorch Profiler 轻量级采集关键算子执行时间，用于自动校准静态模型中的效率参数，提升仿真精度
+1. **以静态分析模型为体**：参考 SimuMax 的 Cost Model + Memory Model + Roofline Model，在 CPU 环境下即可快速评估各种并行策略的性能和显存占用，无需 GPU 资源
+2. **以 Trace 校准为用**：参考 Lumos 的 Trace-driven 思想，在 CPU 环境下通过合成 Trace 或基于 CPU 运行的 PyTorch Profiler 采集关键算子执行时间，用于自动校准静态模型中的效率参数，提升仿真精度
 3. **以框架适配为桥**：参考 Pai-Patch 的 Monkey-patch 架构和 SimAI 的 Hijack 思想，设计非侵入式适配层，自动从 Megatron-LM/Pai-Patch 训练流程中提取模型结构、并行策略配置和运行时参数，实现训练即仿真配置的无缝衔接
 
 ### 2.2 与现有框架的差异化定位
@@ -79,7 +83,7 @@
 ### 2.3 核心创新点
 
 1. **框架原生集成**：不同于 SimAI 的 Hijack 和 SimuMax 的手工配置，本方案通过 Monkey-patch Megatron-LM 的并行状态管理模块（parallel_state.py）和训练参数模块（arguments.py），在训练启动时自动捕获模型配置和并行策略，实现零配置仿真
-2. **混合精度校准**：静态模型在 CPU 上快速迭代策略搜索，Trace 采集在 GPU 上校准关键算子效率，两者互补形成粗筛+精校的两级优化流程
+2. **混合精度校准**：静态模型在 CPU 上快速迭代策略搜索，Trace 采集基于 CPU 运行的 PyTorch Profiler 校准关键算子效率，两者互补形成粗筛+精校的两级优化流程
 3. **面向Pai-Patch的多模型统一抽象**：利用 Pai-Patch 已有的 40+ 模型统一接口，建立跨模型的通用性能分析层，避免为每个模型重复构建仿真逻辑
 
 ---
@@ -177,13 +181,13 @@ def register_megatron_hooks():
 
 #### 3.2.3 Trace Engine（Trace采集与校准引擎）
 
-**目标**：在真实 GPU 上轻量级采集关键算子执行时间，自动校准 Static Engine 的效率参数。
+**目标**：在 CPU 环境下采集关键算子执行时间，自动校准 Static Engine 的效率参数。
 
 **技术方案**：
-- **Trace采集**：使用 torch.profiler（PyTorch Profiler / Kineto）在单次训练迭代中采集 GPU kernel 执行时间
-- **Trace解析**：参考 Lumos，从 Trace 中提取两类任务：
-  - CPU任务：PyTorch算子、CUDA runtime事件（cudaLaunchKernel、cudaStreamSync）
-  - GPU任务：GPU kernel（gemm、flash_attention、layer_norm）
+- **Trace采集**：使用 torch.profiler（PyTorch Profiler / Kineto）在单次 CPU 训练迭代中采集算子执行时间（注：CPU 环境下采集的是 CPU kernel 执行时间，作为效率校准的参考基准）
+- **Trace解析**：参考 Lumos，从 Trace 中提取任务信息：
+  - CPU任务：PyTorch算子执行事件
+  - 计算任务：矩阵运算（gemm）、注意力（attention）、归一化（layer_norm）等算子在 CPU 上的执行时间
 - **效率校准**：将 Trace 中实测的算子执行时间与 Static Engine 的理论估计对比，自动拟合 efficiency_factor 参数
   - 按算子类型+输入形状维度建立效率查找表（类似 SimuMax 的 accurate_efficient_factor）
   - 支持线性回归拟合通信带宽效率（参考 SimuMax 的 nccl_fit.py）
@@ -213,10 +217,10 @@ def register_megatron_hooks():
 **技术方案**：
 - **搜索空间定义**：
   - 变量：TP size, PP size, DP size, EP size, Micro-batch size, Sequence Parallel, Recompute granularity
-  - 约束：TP * PP * DP = world_size, micro_batch_size * micro_batch_num * DP = global_batch_size, peak_mem < GPU_mem
+  - 约束：TP * PP * DP = world_size, micro_batch_size * micro_batch_num * DP = global_batch_size, peak_mem < memory_limit
 - **搜索算法**：
   - Phase 1：网格搜索（Grid Search）快速筛选可行配置（利用Static Engine的CPU快速计算优势）
-  - Phase 2：对Top-K候选配置使用Trace Engine在GPU上精校，选出最优配置
+  - Phase 2：对Top-K候选配置使用Trace Engine在CPU环境下精校，选出最优配置
   - 可扩展：引入贝叶斯优化（Bayesian Optimization）或强化学习进一步加速搜索
 
 #### 3.2.6 Visualization and Reporting（可视化与报告模块）
@@ -340,14 +344,14 @@ ModelPerf/
 
 ### Phase 3：Trace采集与校准（2-3周）
 
-**目标**：引入Trace-driven机制提升仿真精度。
+**目标**：基于CPU环境引入Trace-driven机制提升仿真精度。
 
 | 任务 | 交付物 | 验收标准 |
 |------|--------|----------|
-| PyTorch Profiler封装 | profiler.py | 单次迭代采集，开销<5% |
-| Trace解析器 | trace_parser.py | 能提取CPU/GPU事件及依赖关系 |
+| PyTorch Profiler封装 | profiler.py | 单次迭代采集，开销<5%（CPU环境） |
+| Trace解析器 | trace_parser.py | 能提取CPU执行事件及依赖关系 |
 | 效率参数校准 | calibrator.py | 自动拟合efficiency_factor，性能误差降至<5% |
-| 通信带宽校准 | nccl_fit.py | 线性回归拟合带宽效率，通信误差<10% |
+| 通信带宽校准 | comm_fit.py | 线性回归拟合带宽效率，通信误差<10% |
 | 校准流水线 | calibration_pipeline.sh | 一键完成从Trace采集到参数更新 |
 
 **技术参考**：Lumos（PyTorch Kineto Trace解析）、SimuMax（nccl_fit.py, efficiency_test/）
@@ -387,7 +391,7 @@ ModelPerf/
 | 精度验证 | 与Megatron-LM真实训练对比，端到端性能误差<5%，显存误差<2% |
 | 模型扩展 | 支持Pai-Patch全部40+模型（Qwen3、DeepSeek-V3、LLaMA3等） |
 | 策略扩展 | 支持Context Parallel、通算并行、MoE EP等新特性 |
-| 硬件扩展 | 支持不同GPU架构（A100/H100/H20）的效率参数自动采集 |
+| 硬件扩展 | 支持不同GPU架构（A100/H100/H20）的理论效率参数配置（基于公开规格，无需真实硬件） |
 | 社区开源 | 整理文档，开源ModelPerf核心代码 |
 
 ---
@@ -399,7 +403,7 @@ ModelPerf/
 通过对 SimAI、SimuMax、Lumos、DistSim 四大主流大模型训练性能仿真框架的深入分析，我们提出了 **静态分析为体，Trace校准为用，框架适配为桥** 的混合仿真路线。该方案具有以下核心优势：
 
 1. **与Megatron-LM/Pai-Patch深度集成**：通过Monkey-patch自动提取训练配置，无需手工维护仿真模型，天然支持Pai-Patch的40+模型生态
-2. **CPU/GPU协同工作**：静态模型在CPU上快速策略搜索（秒级），Trace在GPU上精校关键参数（分钟级），形成高效的两级优化流程
+2. **纯CPU环境运行**：静态模型在CPU上快速策略搜索（秒级），Trace基于CPU训练采集并精校关键参数（分钟级），形成高效的两级优化流程，无需GPU硬件
 3. **兼顾精度与可用性**：参考SimuMax实现显存误差<1%的Memory Model，参考Lumos实现Trace驱动的执行依赖建模，参考DistSim实现事件抽象与分层调度
 4. **面向生产环境**：内置策略搜索、瓶颈检测、可视化报告，直接服务于训练调优和资源配置决策
 
@@ -417,7 +421,7 @@ ModelPerf/
 1. **立即启动**：Phase 1 静态仿真核心开发，优先复现 SimuMax 的核心能力（Cost/Mem/Comm Model + 1F1B调度）
 2. **并行准备**：研究 Megatron-LM 的 `parallel_state.py`、`arguments.py`、`transformer_layer.py` 代码，设计Hook点
 3. **一周后验证**：使用现有CPU训练环境（Qwen3 0.6B）验证静态仿真的基本可用性
-4. **两周后接入**：在真实GPU环境（如有）下采集Trace，校准效率参数，验证端到端精度
+4. **两周后接入**：在CPU环境下采集Trace，校准效率参数，验证端到端精度
 
 ---
 
@@ -749,7 +753,8 @@ Megatron-LM `training.py` 已支持 `torch.profiler`：
 with torch.profiler.profile(
     activities=[
         torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.CUDA,
+        # 注：本项目基于 CPU 环境运行，不使用 CUDA
+        # torch.profiler.ProfilerActivity.CUDA,
     ],
     schedule=torch.profiler.schedule(wait=0, warmup=0, active=1),
     on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiling"),
@@ -1080,7 +1085,7 @@ class PerformanceReport:
         self.iteration_time_ms = 0
         self.peak_memory_gb = 0
         self.mfu = 0.0          # Model FLOPs Utilization
-        self.tgs = 0.0          # tokens/sec/GPU
+        self.tgs = 0.0          # tokens/sec/device
         self.breakdown = {}     # 时间分解
         self.bottleneck = ""    # 主要瓶颈
     
@@ -1129,7 +1134,7 @@ class PerformanceReport:
 | 新模型适配 | 需要为新模型手工编写仿真逻辑 | 运行一次训练自动捕获 |
 | 融合算子处理 | 使用理论 FLOPs 估算 | 基于真实 kernel 时间（经 Trace 校准） |
 | 适用场景 | 快速原型验证、大规模策略搜索 | 精确分析、生产环境调优 |
-| 运行依赖 | 纯 CPU，无需 GPU | 需要一次真实 GPU 训练用于捕获 |
+| 运行依赖 | 纯 CPU，无需 GPU | 需要一次真实 CPU 训练用于捕获 |
 | 开发复杂度 | 中等（需要理解并手工建模） | 较高（需要实现多层 Hook 和符号化） |
 
 ### A.5.2 互补关系
@@ -1143,7 +1148,7 @@ class PerformanceReport:
            |                               |
            v                               v
     [Phase 1 静态仿真]              [参数化计算图]
-    - 纯 CPU 运行                    - 需要一次 GPU 捕获
+    - 纯 CPU 运行                    - 需要一次 CPU 捕获
     - 秒级响应                       - 分钟级响应
     - 误差 10-50%                    - 误差 5-10%（经校准后）
            |                               |
@@ -1160,7 +1165,7 @@ class PerformanceReport:
 **协作流程**：
 1. **粗筛**：使用 Phase 1 静态仿真在 CPU 上快速评估大量候选配置（秒级）
 2. **精选**：对 Top-10 候选配置，使用参数化计算图进行精确评估（分钟级）
-3. **验证**：在真实 GPU 上运行 Top-3 配置，验证仿真精度
+3. **验证**：在 CPU 环境下运行 Top-3 配置，对比实际训练性能与仿真结果，验证仿真精度
 
 ### A.5.3 建议实施路径
 
@@ -1222,7 +1227,7 @@ class PerformanceReport:
 
 | 风险 | 影响 | 应对措施 |
 |------|------|---------|
-| CPU 环境无法触发真实通信 | Communication Hook 捕获不到 NCCL 调用 | 使用 mock 通信层（fake distributed）模拟通信行为；或在有 GPU 的环境中进行首次捕获 |
+| CPU 环境使用 gloo 后端通信 | Communication Hook 捕获不到 NCCL 调用（CPU 无 NCCL） | 使用 gloo 后端模拟分布式通信行为；通过 Megatron 代码分析推导 NCCL 通信模式，在仿真层统一转换为通信事件 |
 | 融合算子（FlashAttention）shape 不可见 | 注意力模块内部结构缺失 | 使用 PyTorch Profiler 的 `record_shapes=True` 捕获子 kernel 的 shape；或参考 Megatron 代码手工补充 |
 | Pipeline Parallel 调度复杂 | 1F1B / Interleaved 调度逻辑分散 | 优先支持非 Pipeline 场景（TP+DP），逐步叠加 PP 支持 |
 | 符号化推断错误 | What-if 分析结果不准确 | 建立符号化规则单元测试；使用已知配置验证推断结果 |

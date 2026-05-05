@@ -4,6 +4,10 @@
 
 ## 项目简介
 
+> **环境声明：本项目的大模型训练与性能仿真完全基于 CPU 环境运行，与 CUDA、GPU 无关。**
+>
+> 所有训练流程、计算图捕获、性能仿真和 What-if 分析均在纯 CPU 环境下完成，无需 NVIDIA GPU 或 CUDA  Toolkit。项目中涉及的硬件参数（如 A100/H100 的算力、带宽）仅作为仿真输入的理论值，用于估算性能，不依赖真实 GPU 硬件。
+
 ModelPerf 是一个用于大模型（LLM）分布式训练性能仿真与分析的开源框架。它通过捕获真实训练过程中的计算图（含通信算子），使用符号化公式参数化所有张量形状和通信量，然后通过虚拟执行引擎估算不同配置下的训练性能，无需在真实 GPU 上重新运行训练。
 
 **核心价值**：
@@ -158,8 +162,8 @@ results = analyzer.grid_search(param_grid)
 
 ```bash
 pip install sympy
-# PyTorch 仅在运行真实捕获时需要
-# pip install torch
+# PyTorch CPU 版本（无需 CUDA）
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### 运行示例
@@ -238,13 +242,13 @@ PYTHONPATH=".:$PYTHONPATH" python -m unittest discover -s tests -v
 ### 短期目标（1-2 周）
 
 1. **真实训练捕获验证**
-   - 在 GPU 环境运行 `Pai-Megatron-Patch-12.0` + `Megatron-LM-20250707` 的 Qwen3 0.6B 训练
-   - 启用 5 层 Hook 捕获真实计算图
-   - 对比仿真结果与真实训练性能，校准 Roofline/Bandwidth 模型参数
+   - 在 CPU 环境运行 `Pai-Megatron-Patch-12.0` + `Megatron-LM-20250707` 的 Qwen3 0.6B 训练
+   - 启用 5 层 Hook 捕获真实计算图（基于 CPU 模拟的分布式通信）
+   - 对比仿真结果与 CPU 训练的实际性能，校准 Roofline/Bandwidth 模型参数
 
 2. **通信 Hook 完善**
-   - 当前 CPU 环境无法触发真实 NCCL 通信
-   - 在 GPU 环境验证 `all_reduce`, `all_gather_into_tensor` 等 Hook 能否正确捕获
+   - 当前 CPU 环境使用 gloo 后端模拟分布式通信
+   - 验证 `all_reduce`, `all_gather_into_tensor` 等 Hook 在 CPU 环境下能否正确捕获通信事件和数据量
 
 ### 中期目标（2-4 周）
 

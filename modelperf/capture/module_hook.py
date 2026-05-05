@@ -79,29 +79,17 @@ class ModuleCapture:
         
         return hook
 
-    def _create_backward_hook(self, module_path: str):
-        def hook(module: nn.Module, grad_input, grad_output):
-            if not self._is_active:
-                return
-            
-            if module_path in self._forward_stack:
-                self._forward_stack.remove(module_path)
-        
-        return hook
-
     def register_module(self, module: nn.Module, path: str = ""):
         for name, child in module.named_children():
             child_path = f"{path}.{name}" if path else name
             child_class = child.__class__.__name__
             
             forward_hook = self._create_forward_hook(child_path, child_class)
-            backward_hook = self._create_backward_hook(child_path)
             
             handle_fwd = child.register_forward_hook(forward_hook)
-            handle_bwd = child.register_full_backward_hook(backward_hook)
             
-            self._hooks.extend([handle_fwd, handle_bwd])
-            self._hook_handles[child_path] = (handle_fwd, handle_bwd)
+            self._hooks.append(handle_fwd)
+            self._hook_handles[child_path] = handle_fwd
             
             self.register_module(child, child_path)
 

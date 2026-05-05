@@ -230,35 +230,61 @@ PYTHONPATH=".:$PYTHONPATH" python -m unittest discover -s tests -v
 9. **设计文档** (1232 行)
    - 完整的技术方案设计报告，含附录 A.1-A.6
 
+10. **框架适配层** (`framework_adapter/`, 2026-05-05 新增)
+    - `megatron_hooks.py`: Monkey-patch `parse_args` / `initialize_model_parallel` / `TransformerLayer.__init__`
+    - `config_extractor.py`: 结构化提取 model_config / strategy_config / system_config，导出 JSON
+    - `pai_patch_hooks.py`: Pai-Patch 特有参数捕获
+    - 已在 Qwen3 0.6B CPU 训练上验证，实现零配置仿真
+
+11. **配置数据类** (`config/config_classes.py`, 2026-05-05 新增)
+    - `ModelConfig`: 含 `qwen3_0_6b()` / `llama3_8b()` 工厂方法
+    - `StrategyConfig`: 并行策略配置
+    - `SystemConfig`: 含 `a100()` / `h100()` 硬件理论参数模板
+
+12. **端到端示例** (2026-05-05 新增)
+    - `examples/capture_real_training.py`: Hook → 捕获 → 仿真 → 导出 JSON
+    - `examples/end_to_end_pipeline.py`: 加载真实捕获配置 → 仿真 → 报告生成
+
 ### 验证结果
 
-使用 Qwen3 0.6B 合成数据端到端测试：
+**合成数据测试**（Qwen3 0.6B）：
 - 迭代时间: 2.07 ms（仿真）vs 2.24 ms（基准）, MAPE 7.41%
 - 内存峰值: 2409.50 MB（仿真）vs 2289.03 MB（基准）, MAPE 5.26%
 - 105 个单元测试全部通过
+
+**真实训练捕获验证**（2026-05-05 更新）：
+- 在 Qwen3 0.6B CPU 训练上成功集成 ModelPerf Hook
+- `framework_adapter` 自动提取配置：model_config (17 fields), strategy_config (14 fields), system_config (10 fields)
+- `ModuleCapture` + `CommunicationCapture` 在 gloo 后端下捕获 14 节点计算图（6 个通信节点）
+- 端到端流水线示例运行成功：训练 → 配置提取 → 计算图捕获 → 性能仿真 → JSON 报告
 
 ## 后续工作
 
 ### 短期目标（1-2 周）
 
-1. **真实训练捕获验证**
-   - 在 CPU 环境运行 `Pai-Megatron-Patch-12.0` + `Megatron-LM-20250707` 的 Qwen3 0.6B 训练
-   - 启用 5 层 Hook 捕获真实计算图（基于 CPU 模拟的分布式通信）
-   - 对比仿真结果与 CPU 训练的实际性能，校准 Roofline/Bandwidth 模型参数
+1. **计算图捕获完善**
+   - 当前 ModuleCapture 在模型初始化时触发 forward，需在训练循环中插入以捕获完整迭代
+   - 在真实训练迭代中捕获前向 + 反向传播完整路径
+   - 验证符号化 Shape 推断与真实捕获 shape 的一致性
 
-2. **通信 Hook 完善**
-   - 当前 CPU 环境使用 gloo 后端模拟分布式通信
-   - 验证 `all_reduce`, `all_gather_into_tensor` 等 Hook 在 CPU 环境下能否正确捕获通信事件和数据量
+2. **What-if 分析集成**
+   - 将捕获的计算图加载到 `WhatIfAnalyzer` 中
+   - 演示修改 TP/PP/BS 后的性能变化，无需重新训练
+   - 与 `examples/end_to_end_pipeline.py` 集成
+
+3. **多模型 Hook 适配**
+   - 在 LLaMA3、DeepSeek-V3 训练脚本上测试 Hook 兼容性
+   - 验证 framework_adapter 对不同模型结构的通用性
 
 ### 中期目标（2-4 周）
 
-1. **多模型支持**
-   - 利用 Pai-Patch 的 40+ 模型生态
-   - 为 LLaMA3、DeepSeek-V3 等模型运行捕获，建立模型库
-
-2. **Pipeline Parallelism 完整支持**
+1. **Pipeline Parallelism 完整支持**
    - 当前仅支持气泡时间估算
    - 需要完整模拟 1F1B / Interleaved 调度逻辑
+
+2. **Trace 采集与校准**
+   - 基于 CPU 运行的 PyTorch Profiler 采集算子执行时间
+   - 自动拟合 `efficiency_factor`，将仿真误差降至 <5%
 
 3. **可视化报告**
    - 生成性能对比图表（迭代时间、内存、通信 breakdown）

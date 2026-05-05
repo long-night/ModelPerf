@@ -1,0 +1,9 @@
+[submodule "backends/SimAI"]
+	path = backends/SimAI
+	url = git@github.com:long-night/SimAI.git
+[submodule "backends/SimuMax"]
+	path = backends/SimuMax
+	url = git@github.com:long-night/SimuMax.git
+[submodule "backends/lumos"]
+	path = backends/lumos
+	url = git@github.com:long-night/lumos.git

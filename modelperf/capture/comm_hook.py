@@ -58,17 +58,25 @@ def _get_dtype_size(tensor: Any) -> int:
 class CommunicationCapture:
     _original_funcs: Dict[str, Callable] = {}
     _node_counter: int = 0
-    
+
     def __init__(self, graph: Optional[ComputationalGraph] = None):
         self.graph = graph if graph else ComputationalGraph()
         self._is_active = False
         self._hooks_installed = False
+        self._current_compute_node_id: Optional[str] = None
         
     def _get_node_id(self) -> str:
         node_id = f"comm_{CommunicationCapture._node_counter}"
         CommunicationCapture._node_counter += 1
         return node_id
     
+    def set_current_compute_node(self, node_id: Optional[str]):
+        self._current_compute_node_id = node_id
+
+    def _link_comm_to_compute(self, comm_node_id: str):
+        if self._current_compute_node_id is not None:
+            self.graph.add_edge(self._current_compute_node_id, comm_node_id)
+
     def _create_all_reduce_wrapper(self, orig_func: Callable) -> Callable:
         @wraps(orig_func)
         def wrapper(tensor: torch.Tensor, op: Any = dist.ReduceOp.SUM, group: Any = None, async_op: bool = False):
@@ -77,7 +85,7 @@ class CommunicationCapture:
                 shape, numel, dtype_size, comm_bytes = _get_tensor_info(tensor)
                 comm_size = dist.get_world_size(group) if group else dist.get_world_size()
                 group_name = _get_comm_group_name(group)
-                
+
                 node = GraphNode(
                     node_id=node_id,
                     op_type="all_reduce",
@@ -91,12 +99,13 @@ class CommunicationCapture:
                     comm_bytes=comm_bytes,
                     async_op=async_op,
                 )
-                
+
                 self.graph.nodes[node_id] = node
                 self.graph.forward_nodes.append(node_id)
-            
+                self._link_comm_to_compute(node_id)
+
             return orig_func(tensor, op, group, async_op)
-        
+
         return wrapper
     
     def _create_all_gather_wrapper(self, orig_func: Callable) -> Callable:
@@ -107,7 +116,7 @@ class CommunicationCapture:
                 shape, numel, dtype_size, comm_bytes = _get_tensor_info(input_tensor)
                 comm_size = dist.get_world_size(group) if group else dist.get_world_size()
                 group_name = _get_comm_group_name(group)
-                
+
                 node = GraphNode(
                     node_id=node_id,
                     op_type="all_gather_into_tensor",
@@ -121,12 +130,13 @@ class CommunicationCapture:
                     comm_bytes=comm_bytes,
                     async_op=async_op,
                 )
-                
+
                 self.graph.nodes[node_id] = node
                 self.graph.forward_nodes.append(node_id)
-            
+                self._link_comm_to_compute(node_id)
+
             return orig_func(output_tensor, input_tensor, group, async_op)
-        
+
         return wrapper
     
     def _create_reduce_scatter_wrapper(self, orig_func: Callable) -> Callable:
@@ -137,7 +147,7 @@ class CommunicationCapture:
                 shape, numel, dtype_size, comm_bytes = _get_tensor_info(input_tensor)
                 comm_size = dist.get_world_size(group) if group else dist.get_world_size()
                 group_name = _get_comm_group_name(group)
-                
+
                 node = GraphNode(
                     node_id=node_id,
                     op_type="reduce_scatter_tensor",
@@ -151,12 +161,13 @@ class CommunicationCapture:
                     comm_bytes=comm_bytes,
                     async_op=async_op,
                 )
-                
+
                 self.graph.nodes[node_id] = node
                 self.graph.forward_nodes.append(node_id)
-            
+                self._link_comm_to_compute(node_id)
+
             return orig_func(output_tensor, input_tensor, op, group, async_op)
-        
+
         return wrapper
     
     def _create_all_to_all_wrapper(self, orig_func: Callable) -> Callable:
@@ -167,7 +178,7 @@ class CommunicationCapture:
                 shape, numel, dtype_size, comm_bytes = _get_tensor_info(input_tensor)
                 comm_size = dist.get_world_size(group) if group else dist.get_world_size()
                 group_name = _get_comm_group_name(group)
-                
+
                 node = GraphNode(
                     node_id=node_id,
                     op_type="all_to_all_single",
@@ -181,12 +192,13 @@ class CommunicationCapture:
                     comm_bytes=comm_bytes,
                     async_op=async_op,
                 )
-                
+
                 self.graph.nodes[node_id] = node
                 self.graph.forward_nodes.append(node_id)
-            
+                self._link_comm_to_compute(node_id)
+
             return orig_func(output_tensor, input_tensor, group, async_op)
-        
+
         return wrapper
     
     def _create_broadcast_wrapper(self, orig_func: Callable) -> Callable:
@@ -197,7 +209,7 @@ class CommunicationCapture:
                 shape, numel, dtype_size, comm_bytes = _get_tensor_info(tensor)
                 comm_size = dist.get_world_size(group) if group else dist.get_world_size()
                 group_name = _get_comm_group_name(group)
-                
+
                 node = GraphNode(
                     node_id=node_id,
                     op_type="broadcast",
@@ -211,12 +223,13 @@ class CommunicationCapture:
                     comm_bytes=comm_bytes,
                     async_op=async_op,
                 )
-                
+
                 self.graph.nodes[node_id] = node
                 self.graph.forward_nodes.append(node_id)
-            
+                self._link_comm_to_compute(node_id)
+
             return orig_func(tensor, src, group, async_op)
-        
+
         return wrapper
     
     def install_hooks(self):

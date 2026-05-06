@@ -36,6 +36,7 @@ class BackwardCapture:
             self.graph.nodes[bwd_node_id] = bwd_node
             self.graph.add_edge(node_id, bwd_node_id)
             self.backward_nodes.append(bwd_node_id)
+            self.graph.backward_nodes.append(bwd_node_id)
 
             return grad
 

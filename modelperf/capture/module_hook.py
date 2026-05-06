@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Callable
 import torch
 import torch.nn as nn
 from .graph import ComputationalGraph, GraphNode, OpType, CommType
@@ -30,7 +30,11 @@ def _extract_shapes(args: Any) -> List[Optional[Tuple]]:
 
 
 class ModuleCapture:
-    def __init__(self, graph: Optional[ComputationalGraph] = None):
+    def __init__(
+        self,
+        graph: Optional[ComputationalGraph] = None,
+        backward_capture: Optional[Any] = None,
+    ):
         self.graph = graph if graph else ComputationalGraph()
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
         self._hook_handles: Dict[str, Any] = {}
@@ -38,6 +42,10 @@ class ModuleCapture:
         self._node_counter = 0
         self._is_active = False
         self._in_backward = False
+        self.backward_capture = backward_capture
+        self._node_output_map: Dict[str, Any] = {}
+        self._current_node_id: Optional[str] = None
+        self._on_node_created_callbacks: List[Callable[[str], None]] = []
 
     def _get_node_id(self) -> str:
         node_id = f"mod_{self._node_counter}"
@@ -48,20 +56,20 @@ class ModuleCapture:
         def hook(module: nn.Module, input_args, output):
             if not self._is_active:
                 return output
-            
+
             self._forward_stack.append(module_path)
-            
+
             node_id = self._get_node_id()
             input_shapes = _extract_shapes(input_args)
             output_shapes = _extract_shapes(output)
-            
+
             params: Dict[str, Tuple] = {}
             for name, param in module.named_parameters(recurse=False):
                 if param is not None:
                     params[name] = tuple(param.shape)
-            
+
             phase = OpType.AUTOGRAD_BWD if self._in_backward else OpType.AUTOGRAD_FWD
-            
+
             node = GraphNode(
                 node_id=node_id,
                 op_type=module_class,
@@ -71,13 +79,43 @@ class ModuleCapture:
                 output_shapes=output_shapes,
                 params=params,
             )
-            
+
             self.graph.nodes[node_id] = node
             self.graph.forward_nodes.append(node_id)
-            
+            self._current_node_id = node_id
+            self._node_output_map[node_id] = output
+
+            for cb in self._on_node_created_callbacks:
+                cb(node_id)
+
+            if self.backward_capture is not None and self.backward_capture.enabled:
+                self._register_output_backward_hooks(output, node_id)
+
+            if len(self._forward_stack) > 1:
+                prev_path = self._forward_stack[-2]
+                prev_node_id = self._find_node_by_module_path(prev_path)
+                if prev_node_id is not None:
+                    self.graph.add_edge(prev_node_id, node_id)
+
             return output
-        
+
         return hook
+
+    def _find_node_by_module_path(self, module_path: str) -> Optional[str]:
+        candidates = [
+            nid for nid, node in self.graph.nodes.items()
+            if node.module_path == module_path and nid in self.graph.forward_nodes
+        ]
+        return candidates[-1] if candidates else None
+
+    def _register_output_backward_hooks(self, output: Any, node_id: str):
+        if isinstance(output, torch.Tensor):
+            if output.requires_grad:
+                self.backward_capture.register_tensor_hook(output, node_id)
+        elif isinstance(output, (tuple, list)):
+            for i, out in enumerate(output):
+                if isinstance(out, torch.Tensor) and out.requires_grad:
+                    self.backward_capture.register_tensor_hook(out, f"{node_id}_out{i}")
 
     def register_module(self, module: nn.Module, path: str = ""):
         for name, child in module.named_children():
@@ -92,6 +130,9 @@ class ModuleCapture:
             self._hook_handles[child_path] = handle_fwd
             
             self.register_module(child, child_path)
+
+    def register_on_node_created(self, callback: Callable[[str], None]):
+        self._on_node_created_callbacks.append(callback)
 
     def capture(self, model: nn.Module, sample_input: Any = None):
         self.register_module(model)
@@ -108,6 +149,8 @@ class ModuleCapture:
         self.graph = ComputationalGraph()
         self._node_counter = 0
         self._forward_stack = []
+        self._node_output_map.clear()
+        self._current_node_id = None
         for handle in self._hooks:
             handle.remove()
         self._hooks = []

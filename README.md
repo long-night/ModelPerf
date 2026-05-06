@@ -188,122 +188,143 @@ PYTHONPATH=".:$PYTHONPATH" python -m unittest discover -s tests -v
    - GraphNode 支持 compute/communication/autograd/backward/optimizer 类型
    - ComputationalGraph 支持节点管理、边依赖、序列化
 
-2. **5层 Hook 捕获框架**
-   - Module Hook: 捕获所有 nn.Module 前向调用
-   - Communication Hook: Monkey-patch 6 种 `torch.distributed` 通信原语
-   - Autograd Hook: 捕获自定义 Autograd Function 的 forward/backward
-   - Backward Hook: 注册反向钩子捕获梯度流
-   - Profiler Hook: PyTorch Profiler 运行时校准
+2. **5层 Hook 捕获框架 (2026-05-06 重构完成)**
+   - `CaptureCoordinator` (`capture/coordinator.py`): 统一协调 Module/Comm/Autograd/Backward/Profiler 五层 Hook
+   - `ModuleCapture` (`capture/module_hook.py`): 捕获所有 nn.Module 前向调用，支持 backward 联动、顺序边、节点创建回调
+   - `CommunicationCapture` (`capture/comm_hook.py`): Monkey-patch 6 种 `torch.distributed` 通信原语，支持 compute→comm 上下文关联
+   - `AutogradCapture` (`capture/autograd_hook.py`): 捕获自定义 Autograd Function 的 forward/backward，支持 Megatron 常见函数注册
+   - `BackwardCapture` (`capture/backward_hook.py`): 注册反向钩子捕获梯度流，自动建立 forward→backward 边
+   - `ProfilerCapture` (`capture/profiler_hook.py`): PyTorch Profiler 运行时校准
 
 3. **符号化 Shape 推断器** (`symbolic/shape_inferer.py`)
    - 支持 B, S, H, V, F, TP, PP, DP, CP, EP 等符号
    - 覆盖 ColumnParallelLinear, RowParallelLinear, SelfAttention, MLP, Embedding
    - 通信量公式: all_reduce, all_gather, reduce_scatter, all_to_all
 
-4. **仿真模型**
+4. **仿真模型 (2026-05-06 增强)**
    - Roofline Model: 计算时间估算（支持 A100/H100/V100）
    - Bandwidth Model: 通信时间估算（支持 ring/tree/direct 算法）
    - Memory Tracker: 多设备内存峰值跟踪（支持 activation checkpointing）
+   - Compute/Comm Overlap 建模（`virtual_executor.py` 中 `enable_overlap`）
+   - Pipeline Schedule 模拟：支持 1F1B / GPipe / Interleaved（`pipeline_schedule` 参数）
 
 5. **虚拟执行引擎** (`simulation/virtual_executor.py`)
-   - 自动识别 compute/comm 节点并估算时间
+   - 自动识别 compute/comm/backward 节点并估算时间
    - FLOPs 估算: Linear, Attention (QKV/scores/output), MLP
-   - Pipeline Parallelism 气泡时间模拟
+   - Pipeline Parallelism 气泡时间模拟（1F1B/GPipe/Interleaved）
    - 瓶颈识别: compute/communication/bubble/memory
+   - 符号化 shape/comm_bytes 自动求值桥接（SymbolicShapeInferer → VirtualExecutor）
+   - 新增指标：throughput_tokens_per_sec, memory_efficiency
 
 6. **What-if 分析器** (`analysis/what_if.py`)
    - 配置修改后自动符号替换和重评估
    - 网格搜索最优配置（多线程并行）
    - OOM 预测
+   - 支持 throughput / memory_efficiency 字段
 
-7. **验证框架** (`utils/validator.py`)
+7. **Auto-tuning 自动策略推荐 (2026-05-06 新增)**
+   - `modelperf/tuning/auto_tuner.py`: 基于 WhatIfAnalyzer 的自动并行策略搜索
+   - 智能搜索空间生成（TP/PP/DP 自动过滤无效组合）
+   - 三种优化目标预设：THROUGHPUT / MEMORY_EFFICIENT / BALANCED
+   - Pareto 前沿提取（throughput vs memory 非支配解集）
+   - 约束过滤：内存上限、最大迭代时间、最小吞吐量
+
+8. **可视化报告 (2026-05-06 新增)**
+   - `modelperf/visualization/report_generator.py`: 生成性能对比图表和 HTML 汇总报告
+   - 迭代时间 Breakdown（堆叠条形图）
+   - 内存 Breakdown（饼图）
+   - Compute vs Communication（对比条形图）
+   - matplotlib 自动检测，无依赖时回退到纯 HTML/SVG
+
+9. **验证框架** (`utils/validator.py`)
    - MAPE/RMSE/MAE/R² 误差计算
    - 自动生成验证报告
 
-8. **单元测试** (105 tests, 全部通过)
-   - `test_graph.py`: 计算图数据结构
-   - `test_roofline.py`: Roofline 模型
-   - `test_bandwidth.py`: 带宽模型
-   - `test_memory_tracker.py`: 内存跟踪
-   - `test_symbolic.py`: 符号化推断
+10. **单元测试** (142 tests, 全部通过)
+    - `test_graph.py`: 计算图数据结构
+    - `test_roofline.py`: Roofline 模型
+    - `test_bandwidth.py`: 带宽模型
+    - `test_memory_tracker.py`: 内存跟踪
+    - `test_symbolic.py`: 符号化推断
+    - `test_coordinator.py` (2026-05-06 新增): Coordinator 集成测试（7 个）
+    - `test_symbolic_bridge.py` (2026-05-06 新增): 符号化-执行桥接测试（3 个）
+    - `test_overlap_pipeline.py` (2026-05-06 新增): Overlap/Pipeline 测试（3 个）
+    - `test_auto_tuner.py` (2026-05-06 新增): Auto-tuner 测试（20 个）
+    - `test_visualization.py` (2026-05-06 新增): 可视化测试（4 个）
 
-9. **设计文档** (1232 行)
-   - 完整的技术方案设计报告，含附录 A.1-A.6
+11. **设计文档** (1232 行)
+    - 完整的技术方案设计报告，含附录 A.1-A.6
 
-10. **框架适配层** (`framework_adapter/`, 2026-05-05 新增)
+12. **框架适配层** (`framework_adapter/`)
     - `megatron_hooks.py`: Monkey-patch `parse_args` / `initialize_model_parallel` / `TransformerLayer.__init__`
     - `config_extractor.py`: 结构化提取 model_config / strategy_config / system_config，导出 JSON
     - `pai_patch_hooks.py`: Pai-Patch 特有参数捕获
     - 已在 Qwen3 0.6B CPU 训练上验证，实现零配置仿真
 
-11. **配置数据类** (`config/config_classes.py`, 2026-05-05 新增)
+13. **配置数据类** (`config/config_classes.py`)
     - `ModelConfig`: 含 `qwen3_0_6b()` / `llama3_8b()` 工厂方法
     - `StrategyConfig`: 并行策略配置
     - `SystemConfig`: 含 `a100()` / `h100()` 硬件理论参数模板
 
-12. **端到端示例** (2026-05-05 新增)
+14. **端到端示例**
     - `examples/capture_real_training.py`: Hook → 捕获 → 仿真 → 导出 JSON
-    - `examples/end_to_end_pipeline.py`: 加载真实捕获配置 → 仿真 → 报告生成
+    - `examples/end_to_end_pipeline.py`: 加载真实捕获配置 → 仿真 → What-if → Auto-tuning → 可视化报告 → JSON 报告
+    - `examples/coordinator_demo.py` (2026-05-06 新增): Coordinator 独立演示脚本
 
 ### 验证结果
 
 **合成数据测试**（Qwen3 0.6B）：
 - 迭代时间: 2.07 ms（仿真）vs 2.24 ms（基准）, MAPE 7.41%
 - 内存峰值: 2409.50 MB（仿真）vs 2289.03 MB（基准）, MAPE 5.26%
-- 105 个单元测试全部通过
+- 142 个单元测试全部通过
 
-**真实训练捕获验证**（2026-05-05 更新）：
-- 在 Qwen3 0.6B CPU 训练上成功集成 ModelPerf Hook
+**真实训练捕获验证**（2026-05-06 更新）：
+- 在 Qwen3 0.6B CPU 训练上成功集成 ModelPerf CaptureCoordinator
 - `framework_adapter` 自动提取配置：model_config (17 fields), strategy_config (14 fields), system_config (10 fields)
-- `ModuleCapture` + `CommunicationCapture` 在 gloo 后端下捕获 14 节点计算图（6 个通信节点）
-- 端到端流水线示例运行成功：训练 → 配置提取 → 计算图捕获 → 性能仿真 → JSON 报告
+- **CaptureCoordinator 捕获 3161 节点计算图**：1761 forward + 1400 backward + 261 communication，3154 条边
+- 端到端流水线 v3 运行成功：训练 → 配置提取 → 计算图捕获 → 性能仿真 → What-if 分析 → Auto-tuning → 可视化报告 → JSON 报告
 
 ## 后续工作
 
 ### 短期目标（1-2 周）
 
-1. **计算图捕获完善**
-   - 当前 ModuleCapture 在模型初始化时触发 forward，需在训练循环中插入以捕获完整迭代
-   - 在真实训练迭代中捕获前向 + 反向传播完整路径
-   - 验证符号化 Shape 推断与真实捕获 shape 的一致性
+1. **真实训练迭代完整捕获**
+   - 当前捕获主要在模型初始化和单次 forward/backward 阶段，需在完整训练循环中插入以捕获多迭代统计
+   - 在多步训练后统计节点时间分布，提高仿真精度
 
-2. **What-if 分析集成**
-   - 将捕获的计算图加载到 `WhatIfAnalyzer` 中
-   - 演示修改 TP/PP/BS 后的性能变化，无需重新训练
-   - 与 `examples/end_to_end_pipeline.py` 集成
-
-3. **多模型 Hook 适配**
-   - 在 LLaMA3、DeepSeek-V3 训练脚本上测试 Hook 兼容性
+2. **多模型 Hook 适配**
+   - 在 LLaMA3、DeepSeek-V3 训练脚本上测试 CaptureCoordinator 兼容性
    - 验证 framework_adapter 对不同模型结构的通用性
+
+3. **Trace 采集与校准**
+   - 基于 CPU 运行的 PyTorch Profiler 采集算子执行时间
+   - 自动拟合 `efficiency_factor`，将仿真误差降至 <5%
 
 ### 中期目标（2-4 周）
 
 1. **Pipeline Parallelism 完整支持**
-   - 当前仅支持气泡时间估算
-   - 需要完整模拟 1F1B / Interleaved 调度逻辑
+   - 当前 1F1B/GPipe/Interleaved 调度已支持基本公式估算
+   - 需要更精细的 bubble 建模和 per-stage 内存分析
 
-2. **Trace 采集与校准**
-   - 基于 CPU 运行的 PyTorch Profiler 采集算子执行时间
-   - 自动拟合 `efficiency_factor`，将仿真误差降至 <5%
+2. **可视化增强**
+   - 策略搜索结果的帕累托前沿交互式展示
+   - 多配置对比图表（A/B 测试模式）
 
-3. **可视化报告**
-   - 生成性能对比图表（迭代时间、内存、通信 breakdown）
-   - 策略搜索结果的帕累托前沿展示
-
-### 长期目标（1-2 个月）
-
-1. **与 Phase 1 静态仿真集成**
+3. **与 Phase 1 静态仿真集成**
    - Phase 1 静态仿真用于粗筛（秒级，误差 10-50%）
    - 参数化计算图用于精选（分钟级，误差 5-10%）
    - 统一输出格式和报告生成
 
-2. **Auto-tuning**
-   - 基于仿真结果自动推荐最优并行策略
-   - 支持约束条件（内存上限、最大迭代时间等）
+### 长期目标（1-2 个月）
 
-3. **生产环境部署**
+1. **Auto-tuning 增强**
+   - 支持更多约束条件（网络拓扑、节点间带宽差异）
+   - 引入启发式搜索（遗传算法、贝叶斯优化）替代穷举 grid search
+
+2. **生产环境部署**
    - 作为 Megatron-LM 训练前的配置预检工具
    - CI/CD 集成，训练前自动验证配置可行性
+   - REST API 服务化，支持远程仿真请求
 
 ## 参考文献
 

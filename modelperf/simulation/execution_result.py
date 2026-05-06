@@ -27,7 +27,9 @@ class ExecutionResult:
     pipeline_stages: int = 1
     
     per_device_metrics: Dict[int, Dict[str, float]] = field(default_factory=dict)
-    
+    throughput_tokens_per_sec: float = 0.0
+    memory_efficiency: float = 0.0
+
     def summary(self) -> Dict[str, Any]:
         """Generate summary dict of results."""
         return {
@@ -87,7 +89,10 @@ class ExecutionConfig:
     
     enable_activation_checkpointing: bool = False
     checkpointed_layers: Optional[set] = None
-    
+
+    enable_overlap: bool = True
+    pipeline_schedule: str = "1f1b"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "gpu_type": self.gpu_type,

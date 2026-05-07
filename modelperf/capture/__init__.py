@@ -2,6 +2,8 @@ from .graph import ComputationalGraph, GraphNode, OpType, CommType
 from .module_hook import ModuleCapture
 from .comm_hook import CommunicationCapture, install_communication_hooks
 from .coordinator import CaptureCoordinator
+from .aten_hook import AtenCapture
+from .optimizer_hook import OptimizerCapture
 
 __all__ = [
     'ComputationalGraph',
@@ -12,4 +14,6 @@ __all__ = [
     'CommunicationCapture',
     'install_communication_hooks',
     'CaptureCoordinator',
+    'AtenCapture',
+    'OptimizerCapture',
 ]

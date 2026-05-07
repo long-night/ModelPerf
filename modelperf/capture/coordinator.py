@@ -8,16 +8,29 @@ from .comm_hook import CommunicationCapture
 from .backward_hook import BackwardCapture
 from .autograd_hook import AutogradCapture
 from .profiler_hook import ProfilerCapture
+from .aten_hook import AtenCapture
+from .optimizer_hook import OptimizerCapture
 
 
 class CaptureCoordinator:
-    def __init__(self, graph: Optional[ComputationalGraph] = None):
+    def __init__(
+        self,
+        graph: Optional[ComputationalGraph] = None,
+        use_aten_mode: bool = False,
+    ):
         self.graph = graph if graph else ComputationalGraph()
+        self._use_aten_mode = use_aten_mode
         self.backward_capture = BackwardCapture(self.graph)
         self.module_capture = ModuleCapture(self.graph, backward_capture=self.backward_capture)
         self.comm_capture = CommunicationCapture(self.graph)
         self.autograd_capture = AutogradCapture(self.graph)
         self.profiler_capture = ProfilerCapture(self.graph)
+        self.aten_capture: Optional[AtenCapture] = None
+        self.optimizer_capture: Optional[OptimizerCapture] = None
+
+        if use_aten_mode:
+            self.aten_capture = AtenCapture(self.graph)
+            self.optimizer_capture = OptimizerCapture(aten_capture=self.aten_capture)
 
         self._model: Optional[nn.Module] = None
         self._attached = False
@@ -26,10 +39,13 @@ class CaptureCoordinator:
 
     def attach(self, model: nn.Module) -> "CaptureCoordinator":
         self._model = model
-        self.module_capture.register_module(model)
-        self.comm_capture.install_hooks()
-        self._register_autograd_functions()
-        self._setup_module_to_comm_link()
+        if self._use_aten_mode:
+            self.comm_capture.install_hooks()
+        else:
+            self.module_capture.register_module(model)
+            self.comm_capture.install_hooks()
+            self._register_autograd_functions()
+            self._setup_module_to_comm_link()
         self._attached = True
         return self
 
@@ -56,12 +72,22 @@ class CaptureCoordinator:
             pass
 
     def start(self):
+        if self._use_aten_mode:
+            if self.aten_capture is not None:
+                self.aten_capture.start()
+            if self.optimizer_capture is not None:
+                self.optimizer_capture.install_hooks()
         self.module_capture.start()
         self.comm_capture.start()
         self.backward_capture.start()
         self.autograd_capture.start()
 
     def stop(self):
+        if self._use_aten_mode:
+            if self.aten_capture is not None:
+                self.aten_capture.stop()
+            if self.optimizer_capture is not None:
+                self.optimizer_capture.uninstall_hooks()
         self.module_capture.stop()
         self.comm_capture.stop()
         self.backward_capture.stop()
@@ -73,6 +99,10 @@ class CaptureCoordinator:
         self.backward_capture.clear_hooks()
         self.autograd_capture.unpatch_all()
         self.profiler_capture = ProfilerCapture(self.graph)
+        if self.aten_capture is not None:
+            self.aten_capture.reset()
+        if self.optimizer_capture is not None:
+            self.optimizer_capture.reset()
         self.graph = ComputationalGraph()
         self._model = None
         self._attached = False

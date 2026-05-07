@@ -23,6 +23,19 @@ class CommType(Enum):
     BROADCAST = "broadcast"
 
 
+class ModuleCategory(Enum):
+    PARALLEL_LINEAR = "parallel_linear"
+    ATTENTION = "attention"
+    MLP = "mlp"
+    TRANSFORMER_LAYER = "transformer_layer"
+    EMBEDDING = "embedding"
+    NORM = "norm"
+    OPTIMIZER = "optimizer"
+    COMMUNICATION = "communication"
+    LOSS = "loss"
+    OTHER = "other"
+
+
 @dataclass
 class GraphNode:
     node_id: str
@@ -53,6 +66,10 @@ class GraphNode:
     inputs: List[str] = field(default_factory=list)
     outputs: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    hierarchy_path: Optional[str] = None
+    parent_module_id: Optional[str] = None
+    module_level: int = 0
+    module_category: str = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -77,6 +94,10 @@ class GraphNode:
             "evaluated_flops": self.evaluated_flops,
             "inputs": self.inputs,
             "metadata": self.metadata,
+            "hierarchy_path": self.hierarchy_path,
+            "parent_module_id": self.parent_module_id,
+            "module_level": self.module_level,
+            "module_category": self.module_category,
         }
 
 
@@ -133,3 +154,45 @@ class ComputationalGraph:
             "system_config": self.system_config,
             "summary": self.summary(),
         }
+
+    def export_csv(self, output_dir: str):
+        import os
+        import csv
+        os.makedirs(output_dir, exist_ok=True)
+
+        node_path = os.path.join(output_dir, "nodes.csv")
+        with open(node_path, "w", newline="", encoding="utf-8") as f:
+            if not self.nodes:
+                return
+            sample = next(iter(self.nodes.values()))
+            headers = list(sample.to_dict().keys())
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            for node in self.nodes.values():
+                row = node.to_dict()
+                for k, v in row.items():
+                    if isinstance(v, (list, dict, tuple)):
+                        row[k] = str(v)
+                writer.writerow(row)
+
+        edge_path = os.path.join(output_dir, "edges.csv")
+        with open(edge_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["from_id", "to_id"])
+            for frm, to in self.edges:
+                writer.writerow([frm, to])
+
+    def get_hierarchy_tree(self) -> Dict[str, Any]:
+        tree: Dict[str, Any] = {"root": {}, "node_map": {}}
+        for node_id, node in self.nodes.items():
+            path = node.hierarchy_path or node.module_path or "unclassified"
+            parts = path.split(".") if path else ["unclassified"]
+            current = tree["root"]
+            for idx, part in enumerate(parts):
+                if part not in current:
+                    current[part] = {"_nodes": [], "_children": {}}
+                if idx == len(parts) - 1:
+                    current[part]["_nodes"].append(node_id)
+                current = current[part]["_children"]
+            tree["node_map"][node_id] = path
+        return tree

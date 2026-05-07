@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 import torch
 import torch.nn as nn
 from .graph import ComputationalGraph, GraphNode, OpType, CommType
+from .hierarchy import infer_module_category
 
 
 def _get_tensor_shape(t: Any) -> Optional[Tuple]:
@@ -39,6 +40,7 @@ class ModuleCapture:
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
         self._hook_handles: Dict[str, Any] = {}
         self._forward_stack: List[str] = []
+        self._module_stack: List[Tuple[str, str]] = []
         self._node_counter = 0
         self._is_active = False
         self._in_backward = False
@@ -46,6 +48,7 @@ class ModuleCapture:
         self._node_output_map: Dict[str, Any] = {}
         self._current_node_id: Optional[str] = None
         self._on_node_created_callbacks: List[Callable[[str], None]] = []
+        self._module_node_map: Dict[str, str] = {}
 
     def _get_node_id(self) -> str:
         node_id = f"mod_{self._node_counter}"
@@ -70,6 +73,13 @@ class ModuleCapture:
 
             phase = OpType.AUTOGRAD_BWD if self._in_backward else OpType.AUTOGRAD_FWD
 
+            parent_module_id = None
+            if self._module_stack:
+                parent_module_id = self._module_stack[-1][1]
+
+            module_level = len(module_path.split(".")) if module_path else 0
+            category = infer_module_category(module_class, module_path)
+
             node = GraphNode(
                 node_id=node_id,
                 op_type=module_class,
@@ -78,12 +88,18 @@ class ModuleCapture:
                 input_shapes=input_shapes,
                 output_shapes=output_shapes,
                 params=params,
+                hierarchy_path=module_path,
+                parent_module_id=parent_module_id,
+                module_level=module_level,
+                module_category=category.value,
             )
 
             self.graph.nodes[node_id] = node
             self.graph.forward_nodes.append(node_id)
             self._current_node_id = node_id
             self._node_output_map[node_id] = output
+            self._module_stack.append((module_path, node_id))
+            self._module_node_map[module_path] = node_id
 
             for cb in self._on_node_created_callbacks:
                 cb(node_id)
@@ -99,6 +115,14 @@ class ModuleCapture:
 
             return output
 
+        return hook
+
+    def _create_forward_post_hook(self, module_path: str):
+        def hook(module: nn.Module, input_args, output):
+            if self._is_active:
+                if self._module_stack and self._module_stack[-1][0] == module_path:
+                    self._module_stack.pop()
+            return output
         return hook
 
     def _find_node_by_module_path(self, module_path: str) -> Optional[str]:
@@ -121,14 +145,17 @@ class ModuleCapture:
         for name, child in module.named_children():
             child_path = f"{path}.{name}" if path else name
             child_class = child.__class__.__name__
-            
+
             forward_hook = self._create_forward_hook(child_path, child_class)
-            
+            post_hook = self._create_forward_post_hook(child_path)
+
             handle_fwd = child.register_forward_hook(forward_hook)
-            
+            handle_post = child.register_forward_hook(post_hook)
+
             self._hooks.append(handle_fwd)
+            self._hooks.append(handle_post)
             self._hook_handles[child_path] = handle_fwd
-            
+
             self.register_module(child, child_path)
 
     def register_on_node_created(self, callback: Callable[[str], None]):
@@ -149,6 +176,8 @@ class ModuleCapture:
         self.graph = ComputationalGraph()
         self._node_counter = 0
         self._forward_stack = []
+        self._module_stack.clear()
+        self._module_node_map.clear()
         self._node_output_map.clear()
         self._current_node_id = None
         for handle in self._hooks:

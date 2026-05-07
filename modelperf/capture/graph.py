@@ -112,6 +112,7 @@ class ComputationalGraph:
     framework_version: str = ""
     forward_nodes: List[str] = field(default_factory=list)
     backward_nodes: List[str] = field(default_factory=list)
+    parallel_identity: Dict = field(default_factory=dict)
 
     def add_node(self, **kwargs) -> GraphNode:
         node_id = kwargs.pop("node_id", f"node_{len(self.nodes)}")
@@ -153,6 +154,7 @@ class ComputationalGraph:
             "strategy_config": self.strategy_config,
             "system_config": self.system_config,
             "summary": self.summary(),
+            "parallel_identity": self.parallel_identity,
         }
 
     def export_csv(self, output_dir: str):

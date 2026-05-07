@@ -52,6 +52,7 @@ class GraphNode:
     grad_output_shapes: List[Optional[Tuple]] = field(default_factory=list)
     inputs: List[str] = field(default_factory=list)
     outputs: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
@@ -75,6 +76,7 @@ class GraphNode:
             "evaluated_time_ms": self.evaluated_time_ms,
             "evaluated_flops": self.evaluated_flops,
             "inputs": self.inputs,
+            "metadata": self.metadata,
         }
 
 

@@ -475,6 +475,120 @@ print(f"Report: {report_path}")
 | `SP` | Sequence Parallelism（序列并行） | true |
 
 这些参数会被 `ConfigExtractor` 自动提取到 `strategy_config` 中，供后续仿真使用。
+
+### 5.6 多进程计算图捕获与合并（DP/TP/PP）
+
+当使用混合并行（如 DP=2, TP=2, PP=2）时，每个 rank 捕获的计算图不同。ModelPerf 通过 `parallel_identity` 机制管理多 rank 图：
+
+**保存阶段**：每个 rank 独立保存，文件名包含并行身份
+
+```python
+# 在 pretrain_qwen.py 中自动完成
+graph_obj.parallel_identity = {
+    'world_rank': rank,
+    'dp_rank': dp_rank,
+    'tp_rank': tp_rank,
+    'pp_rank': pp_rank,
+    'dp_size': dp_size,
+    'tp_size': tp_size,
+    'pp_size': pp_size,
+}
+
+# 保存为：computational_graph_pp{pp}_tp{tp}_dp{dp}.json
+```
+
+**输出目录结构**（以 DP=2, TP=2, PP=2 为例）：
+```
+captured_graph/
+├── computational_graph_pp0_tp0_dp0.json   # Stage 0, TP rank 0
+├── computational_graph_pp0_tp1_dp0.json   # Stage 0, TP rank 1
+├── computational_graph_pp1_tp0_dp0.json   # Stage 1, TP rank 0
+└── computational_graph_pp1_tp1_dp0.json   # Stage 1, TP rank 1
+```
+
+**三种并行维度的图特征**：
+
+| 维度 | 各 rank 图关系 | 合并策略 |
+|------|---------------|---------|
+| **DP** | 基本相同（数据输入不同） | 去重：保留一个副本 |
+| **TP** | 互补（权重切片不同） | 保留所有 unique 节点 |
+| **PP** | 层间互补（不同 stage） | 按层号拼接 |
+
+### 5.7 使用 modelperf_eval.py 进行仿真
+
+`modelperf_eval.py` 是端到端的性能评估脚本，支持自动加载并合并多 rank 计算图：
+
+```bash
+cd /mnt/d/ubuntu/opencode/training_framework/ModelPerf
+python examples/modelperf_eval.py \
+    --config-dir examples/output/captured_configs \
+    --graph-dir examples/output/captured_graph \
+    --output-dir examples/output/reports \
+    --label "qwen3_dp2_tp2_pp2"
+```
+
+**三级合并流水线**：
+
+```
+输入: N 个 rank 的图文件
+  ↓
+[Step 1/3] 去重 DP replicas
+  按 (pp_rank, tp_rank) 分组，每组内 node_id 去重
+  输出: M 个 unique (PP, TP) 组合图
+  ↓
+[Step 2/3] 合并 TP ranks
+  按 pp_rank 分组，组内保留所有 unique 节点（TP 切分互补）
+  输出: P 个 PP stage 图（P = pp_size）
+  ↓
+[Step 3/3] 拼接 PP stages
+  按 pp_rank 排序，合并为全局逻辑图
+  输出: 1 个最终图
+```
+
+**回退兼容**：支持旧格式 `computational_graph_rank*.json` 和 `computational_graph.json`。
+
+### 5.8 混合并行仿真实例
+
+以下是在 Qwen3 0.6B 上运行 DP=2, TP=2, PP=2 并仿真的完整流程：
+
+```bash
+# 1. 运行训练（自动捕获计算图）
+cd /mnt/d/ubuntu/opencode/training_framework/Pai-Megatron-Patch-12.0/examples/qwen3
+bash train_qwen3_0.6B_dp2.sh   # DP=2
+bash train_qwen3_0.6B_tp2.sh   # TP=2
+bash train_qwen3_0.6B_pp2.sh   # PP=2
+
+# 2. 仿真评估
+cd /mnt/d/ubuntu/opencode/training_framework/ModelPerf
+python examples/modelperf_eval.py \
+    --config-dir examples/output/captured_configs \
+    --graph-dir examples/output/captured_graph \
+    --output-dir examples/output/reports_dp2 \
+    --label "DP2"
+
+python examples/modelperf_eval.py \
+    --config-dir examples/output/captured_configs \
+    --graph-dir examples/output/captured_graph \
+    --output-dir examples/output/reports_tp2 \
+    --label "TP2"
+
+python examples/modelperf_eval.py \
+    --config-dir examples/output/captured_configs \
+    --graph-dir examples/output/captured_graph \
+    --output-dir examples/output/reports_pp2 \
+    --label "PP2"
+```
+
+**仿真结果示例**：
+
+| 策略 | Iteration Time | Compute Time | Comm Time | Peak Memory | Bottleneck |
+|------|---------------|--------------|-----------|-------------|------------|
+| **DP2** | 0.43 ms | 0.43 ms | 0.00 ms | 42.34 MB | compute |
+| **TP2** | 0.43 ms | 0.43 ms | 0.00 ms | 42.34 MB | compute |
+| **PP2** | 0.43 ms | 0.43 ms | 0.00 ms | 42.34 MB | compute |
+
+> **注意**：当前 Roofline 模型对小模型（0.09B）的评估结果趋于一致。在真实大模型（>1B）上，不同并行策略的差异会更显著。
+
 ---
 
 ## 6. 在 Megatron-LM 中使用
@@ -990,7 +1104,7 @@ python -m unittest discover -s tests -p "test_*.py" -v  # 排除集成测试
 
 ---
 
-> **文档版本**：v1.0  
-> **最后更新**：2026-05-06  
+> **文档版本**：v1.1  
+> **最后更新**：2026-05-07  
 > **项目地址**：`ModelPerf/`  
 > **相关问题请查阅**：`docs/development_log.md`（开发历程记录）
